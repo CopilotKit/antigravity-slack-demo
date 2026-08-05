@@ -19,11 +19,15 @@ services:
     envVars:
       - key: GEMINI_API_KEY
         sync: false
-      # chat | readonly | full. `full` adds create_file/edit_file/run_command
-      # behind an approval prompt in Slack. Demote here to disarm it without a
-      # code change.
+      # chat | readonly | full. Demote here to disarm the shell without a code
+      # change.
       - key: AGENT_TOOLS
         value: full
+      # Off: tools run unattended. With AGENT_TOOLS=full that is unguarded
+      # shell for anyone who can mention the bot. Set true once the agent emits
+      # the CUSTOM events the channel's onInterrupt handlers listen for.
+      - key: AGENT_TOOL_APPROVAL
+        value: "false"
       - key: AGENT_MODEL
         value: gemini-3.6-flash
       # Short on purpose: the model garbles long paths when echoing them into a

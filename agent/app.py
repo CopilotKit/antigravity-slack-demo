@@ -51,14 +51,21 @@ if TOOLS not in _LEVELS:
         f"AGENT_TOOLS must be one of {sorted(_LEVELS)}, got {TOOLS!r}"
     )
 
-# Only the write/shell level needs a human gate. Setting it also satisfies the
-# SDK's mandatory-safety guard, so no allow_all policy is needed at that level.
+# Independent of the tool level, and OFF by default.
 #
-# NOTE: an approval parks the tool until someone answers in Slack. That depends
-# on the channel wiring an onInterrupt handler and calling thread.resume(); if
-# it does not, a run_command hangs rather than prompting. Demote AGENT_TOOLS to
-# `readonly` to take that path out of play.
-APPROVAL = TOOLS == "full"
+# On, every non-auto-approved call parks until someone answers in Slack, which
+# needs the channel to wire an onInterrupt handler and call thread.resume().
+# Off, tools run unattended -- with AGENT_TOOLS=full that means anyone who can
+# mention the bot can run shell commands in the workspace, so keep the Slack
+# channel restricted and treat the instance as disposable.
+#
+# When this is off the adapter supplies policy.allow_all() itself, which is
+# what satisfies the SDK's mandatory-safety guard for write tools.
+APPROVAL = os.environ.get("AGENT_TOOL_APPROVAL", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 INSTRUCTIONS = os.environ.get(
     "AGENT_INSTRUCTIONS",

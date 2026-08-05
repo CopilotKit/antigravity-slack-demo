@@ -35,7 +35,8 @@ changes from the dashboard without a code change.
 
 | Var | Default | Notes |
 |---|---|---|
-| `AGENT_TOOLS` | `full` | `chat`, `readonly`, or `full`. `full` adds `create_file`, `edit_file`, `run_command` **behind an approval prompt in Slack**. |
+| `AGENT_TOOLS` | `full` | `chat`, `readonly`, or `full`. `full` adds `create_file`, `edit_file`, `run_command`. |
+| `AGENT_TOOL_APPROVAL` | `false` | Off: tools run unattended. With `full` that is **unguarded shell for anyone who can mention the bot**. |
 | `AGENT_MODEL` | `gemini-3.6-flash` | Native Gemini path; no OpenAI shim in the image. |
 | `AGENT_WORKSPACE` | `/data/ws` | On the disk. Deliberately short — see below. |
 | `AGENT_SAVE_DIR` | `/data/save` | Conversation trajectories. On the disk so threads survive a deploy. |
@@ -57,18 +58,28 @@ since sessions live in memory and a parked coroutine cannot be moved.
 
 ## Human-in-the-loop
 
-With `AGENT_TOOLS=full`, a write or shell call posts an Approve/Deny prompt in
-the thread and waits.
+**Currently off.** `AGENT_TOOL_APPROVAL=false` with `AGENT_TOOLS=full` means
+write and shell tools run unattended: anyone who can mention the bot can run
+commands in `/data/ws`. The Slack channel's membership is the access boundary,
+so keep it restricted and treat the instance as disposable.
+`AGENT_TOOLS=readonly` disarms it from the dashboard.
 
-The wiring is exact and easy to break: the Slack renderer only raises an
-interrupt for an AG-UI **CUSTOM event whose `name` matches a registered
-handler**, and the answer travels back to the agent as
-`forwardedProps.command`. `channel/src/index.tsx` registers `tool_approval` and
-`ask_question`; the agent must emit CUSTOM events under exactly those names.
+The gate exists but is not wired end to end yet. `channel/src/index.tsx`
+already registers `onInterrupt` handlers for `tool_approval` and
+`ask_question`, and the agent already accepts the answer back via
+`forwardedProps.command`. The missing half is the emit side: the Slack renderer
+only raises an interrupt for an AG-UI **CUSTOM event whose `name` matches a
+registered handler**
 
-If they do not match, nothing errors — the tool simply stays parked and the bot
-looks like it has gone quiet. Set `AGENT_TOOLS=readonly` to take that path out
-of play.
+```js
+if (!e.name || !interruptEventNames.has(e.name)) return;
+pendingInterrupt = { eventName: e.name, value };
+```
+
+and the agent emits a `RunFinishedInterruptOutcome` instead. Until it also
+emits those CUSTOM events, turning `AGENT_TOOL_APPROVAL` on would park every
+tool call forever rather than prompting — which reads as a bot that has gone
+quiet, not as an error.
 
 ## Local development
 
