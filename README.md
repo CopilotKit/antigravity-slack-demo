@@ -71,14 +71,34 @@ this side renders it and answers.
 
 | Tool | Renders | Notes |
 |---|---|---|
-| `show_image` | Block Kit image | URL must be public https — Slack fetches it server-side. |
+| `show_image` | Uploaded file | Downloads the URL and uploads the bytes — see below. |
 | `show_table` | Block Kit table | Up to 6 columns, 20 rows. |
 | `ask_choice` | Buttons, or a menu above 5 options | Does not return the pick — see below. |
 
 Nothing in the system prompt mentions them; the tool descriptions are what
 teach the model when to reach for one.
 
-### Two limits worth knowing
+### Why `show_image` uploads rather than linking
+
+An `<Image url>` block makes **Slack** fetch the URL when the message is
+posted. If that fetch fails, Slack answers `invalid_blocks`, which is a
+non-retryable delivery failure: it aborts the whole run, so the user gets
+silence instead of an error. It is not predictable from the worker either —
+during testing a Wikimedia thumbnail that the worker downloaded without trouble
+was refused by Slack's own fetcher.
+
+So the tool downloads the bytes itself and posts them with `thread.postFile`.
+Slack never fetches anything, and every remaining failure — unreachable,
+non-2xx, not an image, empty, over 8 MB — is one the worker can see and hand
+back to the model as text, which it can then act on. Surfaces without file
+upload fall back to the URL block.
+
+This matters more than it sounds: the model *does* act on those messages. When
+an early version wrongly rejected a good URL, the agent shelled out, downloaded
+the file and mirrored it to a public third-party host to get a link that would
+pass. The error text now tells it explicitly not to.
+
+### Two more limits worth knowing
 
 **`ask_choice` cannot wait for the click.** `Thread.awaitChoice()` rejects on
 managed Channels — `channels-intelligence` declares
