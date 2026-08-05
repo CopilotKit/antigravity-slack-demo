@@ -65,15 +65,34 @@ const channel = createChannel({
   agent: (threadId: string) => new HttpAgent({ url: AGENT_URL, threadId }),
 });
 
+/**
+ * Wraps a handler so the run loop is visible in the logs.
+ *
+ * Without this the worker logs only startup and errors, so a run that posts a
+ * reply and then leaves Slack's typing indicator spinning is indistinguishable
+ * from one still doing work: both are silence.
+ */
+async function traced(label: string, run: () => Promise<void>): Promise<void> {
+  const started = Date.now();
+  console.log(`[${label}] runAgent →`);
+  try {
+    await run();
+    console.log(`[${label}] runAgent ← returned after ${Date.now() - started}ms`);
+  } catch (error) {
+    console.error(`[${label}] runAgent ✗ after ${Date.now() - started}ms`, error);
+    throw error;
+  }
+}
+
 channel.onMention(async ({ thread }) => {
   // Subscribe before running: this is what makes onMessage fire for the rest
   // of the thread. Without it the bot answers once and then goes quiet.
   await thread.subscribe();
-  await thread.runAgent();
+  await traced("mention", () => thread.runAgent());
 });
 
 channel.onMessage(async ({ thread }) => {
-  await thread.runAgent();
+  await traced("message", () => thread.runAgent());
 });
 
 // ---------------------------------------------------------------------------
