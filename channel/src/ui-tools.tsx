@@ -92,52 +92,79 @@ const PROBE_HEADERS = {
   accept: "image/*,*/*;q=0.8",
 };
 
-/** Some hosts reject HEAD outright; ask for a single byte instead. */
-async function probe(url: string, method: "HEAD" | "GET"): Promise<Response> {
-  return fetch(url, {
-    method,
-    redirect: "follow",
-    signal: AbortSignal.timeout(5_000),
-    headers:
-      method === "GET"
-        ? { ...PROBE_HEADERS, range: "bytes=0-0" }
-        : PROBE_HEADERS,
-  });
-}
+/** Slack's own limit is larger, but a chat client has no use for more. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+type Fetched =
+  | { ok: true; bytes: Uint8Array; filename: string }
+  | { ok: false; reason: string };
 
 /**
- * Check the URL looks fetchable, and say why not in terms the model can act on.
+ * Download the image so Slack never has to.
  *
- * Deliberately biased towards posting. A malformed URL is fatal — Slack
- * rejects the block and aborts the run — but that case is already handled by
- * {@link normalizeImageUrl}; a well-formed URL that merely 500s costs at worst
- * a broken thumbnail. So only a definite "this is not an image" refuses:
- * anything ambiguous (405, 403, a host that dislikes probes) is allowed
- * through rather than risking a false rejection, which is what sent an earlier
- * run off mirroring the file to a third-party host.
+ * An `<Image url>` block makes *Slack* fetch the URL when the message is
+ * posted, and if that fetch fails Slack answers `invalid_blocks`, which is a
+ * non-retryable delivery failure that aborts the whole run — the user sees
+ * silence. It is not predictable from here either: the probe that preceded
+ * this happily fetched a Wikimedia thumbnail that Slack's own fetcher was
+ * refused, because Wikimedia filters on User-Agent.
+ *
+ * Fetching the bytes here and uploading them removes Slack's fetch from the
+ * path entirely, so the only failures left are ones we can see and describe.
  */
-async function imageFetchProblem(url: string): Promise<string | null> {
+async function fetchImage(url: string): Promise<Fetched> {
   let response: Response;
   try {
-    response = await probe(url, "HEAD");
-    // Method-not-allowed and friends say nothing about the image itself.
-    if (response.status >= 400) response = await probe(url, "GET");
+    response = await fetch(url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(10_000),
+      headers: PROBE_HEADERS,
+    });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    return `Could not reach ${url} (${reason}). Slack fetches images server-side, so the link must be publicly reachable. Nothing was posted - do not try to mirror or re-upload the file, just use a different URL or tell the user.`;
+    return {
+      ok: false,
+      reason: `Could not download ${url} (${reason}). Nothing was posted - do not mirror or re-upload the file anywhere, just use a different URL or tell the user.`,
+    };
   }
 
-  if (response.status === 404 || response.status === 410) {
-    return `${url} returned HTTP ${response.status} - there is nothing there. Nothing was posted; use a different URL or tell the user.`;
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: `${url} returned HTTP ${response.status}. Nothing was posted - do not mirror or re-upload the file anywhere, just use a different URL or tell the user.`,
+    };
   }
 
   const contentType = response.headers.get("content-type") ?? "";
   // A 200 serving HTML is the usual shape of a link to a *page about* an image
   // rather than the image file itself.
-  if (response.ok && contentType && !contentType.startsWith("image/")) {
-    return `${url} serves "${contentType}", not an image. Link directly to the image file. Nothing was posted.`;
+  if (contentType && !contentType.startsWith("image/")) {
+    return {
+      ok: false,
+      reason: `${url} serves "${contentType}", not an image. Link directly to the image file. Nothing was posted.`,
+    };
   }
-  return null;
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength === 0) {
+    return { ok: false, reason: `${url} returned an empty file. Nothing was posted.` };
+  }
+  if (bytes.byteLength > MAX_IMAGE_BYTES) {
+    return {
+      ok: false,
+      reason: `${url} is ${Math.round(bytes.byteLength / 1e6)} MB, over the ${MAX_IMAGE_BYTES / 1e6} MB limit. Nothing was posted; use a smaller image.`,
+    };
+  }
+  return { ok: true, bytes, filename: filenameFor(url, contentType) };
+}
+
+/** Slack shows the filename next to the upload, so make it a sane one. */
+function filenameFor(url: string, contentType: string): string {
+  const base = new URL(url).pathname.split("/").pop() ?? "";
+  const cleaned = base.replace(/[^A-Za-z0-9._-]/g, "").slice(-64);
+  if (/\.[A-Za-z0-9]{2,5}$/.test(cleaned)) return cleaned;
+  const extension = contentType.split("/")[1]?.split(";")[0] ?? "png";
+  return `${cleaned || "image"}.${extension.replace(/[^a-z0-9]/gi, "") || "png"}`;
 }
 
 /**
@@ -177,20 +204,40 @@ export const ShowImage = defineChannelTool({
       );
     }
 
-    const problem = await imageFetchProblem(normalized);
-    if (problem) return problem;
+    const fetched = await fetchImage(normalized);
+    if (!fetched.ok) return fetched.reason;
 
-    await thread.post(
-      <Message>
-        {caption ? (
-          <Section>
-            <Markdown>{caption}</Markdown>
-          </Section>
-        ) : null}
-        <Image url={normalized} alt={alt ?? caption ?? "image"} />
-      </Message>,
-    );
-    return "Displayed the image to the user. Acknowledge briefly; do not repeat the URL back to them.";
+    const upload = await thread.postFile({
+      bytes: fetched.bytes,
+      filename: fetched.filename,
+      title: caption ?? alt ?? fetched.filename,
+      altText: alt ?? caption ?? "image",
+    });
+
+    if (!upload.ok) {
+      // Surfaces without file upload still render an image block; the URL has
+      // to survive Slack's own fetch there, but that is the best available.
+      await thread.post(
+        <Message>
+          {caption ? (
+            <Section>
+              <Markdown>{caption}</Markdown>
+            </Section>
+          ) : null}
+          <Image url={normalized} alt={alt ?? caption ?? "image"} />
+        </Message>,
+      );
+      return "Displayed the image to the user. Acknowledge briefly; do not repeat the URL back to them.";
+    }
+
+    if (caption) {
+      await thread.post(
+        <Message>
+          <Context>{caption}</Context>
+        </Message>,
+      );
+    }
+    return "Uploaded and displayed the image to the user. Acknowledge briefly; do not repeat the URL back to them.";
   },
 });
 
