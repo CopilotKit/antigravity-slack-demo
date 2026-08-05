@@ -1,6 +1,10 @@
-# internal-antigravity-slack-channel
+# antigravity-slack-demo
 
 The Antigravity agent, in Slack.
+
+Public on purpose: it holds no credentials, and a public repository URL is all
+Render needs to deploy it — no GitHub App install required. Secrets are set in
+the Render dashboard, never here.
 
 ```
 Slack  →  CopilotKit Intelligence  →  channel worker  →  agent  →  back
