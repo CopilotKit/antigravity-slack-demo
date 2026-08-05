@@ -1,0 +1,8 @@
+# The Antigravity AG-UI integration is not on PyPI yet. Pinned to the branch
+# while PR #2277 is open; swap to a released version once it merges.
+#
+# google-antigravity ships platform-specific wheels bundling the Go
+# localharness binary, so this must be installed on the target platform
+# (linux/amd64 here), not copied from a Mac build.
+ag-ui-antigravity @ git+https://github.com/ag-ui-protocol/ag-ui@mme/antigravity#subdirectory=integrations/antigravity/python
+uvicorn[standard]>=0.35.0

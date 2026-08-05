@@ -1,0 +1,5 @@
+node_modules/
+.env
+.copilotkit/artifacts/
+__pycache__/
+*.pyc
