@@ -50,22 +50,84 @@ import { z } from "zod";
 /** Above this many options, buttons stop fitting a Slack row; use a menu. */
 const MAX_BUTTONS = 5;
 
+/** Slack rejects a text object that is empty, so blank cells need a stand-in. */
+const EMPTY_CELL = "—";
+
+/**
+ * Recover a plain URL from whatever the model passed.
+ *
+ * Slack delivers links to the agent in its own markup — `<https://x/y|x/y…>`,
+ * with the display half often elided — and the model tends to hand back what
+ * it saw. Posting that produces `invalid field at /blocks/N/image_url`, which
+ * is a *non-retryable delivery failure*: it aborts the whole run, so the user
+ * gets silence rather than an error. Hence normalise here, and reject anything
+ * still not a plain https URL.
+ */
+function normalizeImageUrl(raw: string): string | null {
+  let value = raw.trim();
+  if (value.startsWith("<") && value.endsWith(">")) value = value.slice(1, -1);
+  const pipe = value.indexOf("|");
+  if (pipe !== -1) value = value.slice(0, pipe);
+  value = value.trim();
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  // Slack fetches the image server-side over TLS and will not follow http.
+  if (parsed.protocol !== "https:") return null;
+  return parsed.toString();
+}
+
+/**
+ * Check Slack will be able to fetch it, before handing Slack something fatal.
+ *
+ * Returns an explanation for the model, or `null` when the URL looks good.
+ */
+async function imageFetchProblem(url: string): Promise<string | null> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "HEAD",
+      redirect: "follow",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return `Could not reach ${url} (${reason}). Slack fetches images server-side, so the link must be publicly accessible. Nothing was posted.`;
+  }
+  if (!response.ok) {
+    return `${url} returned HTTP ${response.status}. Slack could not load it either, so nothing was posted. Use a different URL.`;
+  }
+  const contentType = response.headers.get("content-type") ?? "";
+  // A 200 that serves HTML is the usual shape of a link to a *page* about an
+  // image rather than the image file.
+  if (contentType && !contentType.startsWith("image/")) {
+    return `${url} serves "${contentType}", not an image. Link directly to the image file. Nothing was posted.`;
+  }
+  return null;
+}
+
 /**
  * Show an image.
  *
- * A component rather than a tool: `defineChannelComponent` gives the SDK a
- * schema it can hand the model *and* a renderer, so posting is handled for us
- * and the handler survives a restart when a durable store is configured.
+ * A tool rather than a component so a bad URL can be *reported to the model*
+ * instead of reaching Slack: the return value of a tool is what the model
+ * reads, so it can correct itself and retry, which a component's renderer has
+ * no way to do.
  */
-export const ShowImage = defineChannelComponent({
+export const ShowImage = defineChannelTool({
   name: "show_image",
   description:
     "Display an image to the user. Use this whenever the answer is better " +
     "shown than described - a diagram, screenshot, photo or chart image. " +
-    "The URL must be a public https link that needs no authentication; " +
-    "Slack fetches it server-side, so localhost and file paths will not work.",
+    "Pass a bare public https URL pointing at the image file itself, with no " +
+    "surrounding <> or | markup. Slack fetches it server-side, so localhost " +
+    "paths, file paths and anything needing a login will not work.",
   parameters: z.object({
-    url: z.string().describe("Public https URL of the image."),
+    url: z.string().describe("Bare public https URL of the image file."),
     alt: z
       .string()
       .optional()
@@ -75,17 +137,30 @@ export const ShowImage = defineChannelComponent({
       .optional()
       .describe("One line shown above the image explaining what it is."),
   }),
-  render({ url, alt, caption }) {
-    return (
+  async handler({ url, alt, caption }, { thread }) {
+    const normalized = normalizeImageUrl(url);
+    if (!normalized) {
+      return (
+        `"${url}" is not a usable image URL, so nothing was posted. It must be ` +
+        "a plain https:// link to the image file - strip any <> or | markup " +
+        "Slack added around it."
+      );
+    }
+
+    const problem = await imageFetchProblem(normalized);
+    if (problem) return problem;
+
+    await thread.post(
       <Message>
         {caption ? (
           <Section>
             <Markdown>{caption}</Markdown>
           </Section>
         ) : null}
-        <Image url={url} alt={alt ?? caption ?? "image"} />
-      </Message>
+        <Image url={normalized} alt={alt ?? caption ?? "image"} />
+      </Message>,
     );
+    return "Displayed the image to the user. Acknowledge briefly; do not repeat the URL back to them.";
   },
 });
 
@@ -103,7 +178,13 @@ export const ShowTable = defineChannelComponent({
     "about ten rows read well in Slack.",
   parameters: z.object({
     title: z.string().optional().describe("Optional line above the table."),
-    columns: z.array(z.string()).min(1).max(6).describe("Column headers."),
+    // Non-empty: Slack rejects a text object with an empty string, and an
+    // invalid block aborts the whole run rather than degrading.
+    columns: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(6)
+      .describe("Column headers, each non-empty."),
     rows: z
       .array(z.array(z.string()))
       .min(1)
@@ -121,9 +202,10 @@ export const ShowTable = defineChannelComponent({
         <Table columns={columns.map((header) => ({ header }))}>
           {rows.map((cells) => (
             <Row>
-              {/* Short rows are padded so cells stay under their headers. */}
+              {/* Short rows are padded so cells stay under their headers, and
+                  blank cells get a dash -- see the schema note above. */}
               {columns.map((_, index) => (
-                <Cell>{cells[index] ?? ""}</Cell>
+                <Cell>{cells[index]?.trim() || EMPTY_CELL}</Cell>
               ))}
             </Row>
           ))}
@@ -234,6 +316,12 @@ export const AskChoice = defineChannelTool({
   },
 });
 
-/** Everything registered on the channel, in one place. */
-export const UI_COMPONENTS = [ShowImage, ShowTable];
-export const UI_TOOLS = [AskChoice];
+/**
+ * Everything registered on the channel, in one place.
+ *
+ * Components render and nothing more; tools are the ones that need to talk
+ * back to the model — to report a bad URL, or to say "I posted a picker, stop
+ * and wait".
+ */
+export const UI_COMPONENTS = [ShowTable];
+export const UI_TOOLS = [ShowImage, AskChoice];
