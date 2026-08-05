@@ -60,6 +60,40 @@ or the service restarts. Without it, every deploy gives every thread amnesia.
 The disk also pins the service to a single instance — which is correct here,
 since sessions live in memory and a parked coroutine cannot be moved.
 
+## Rich UI
+
+The agent can post images, tables and clickable choices itself. It speaks plain
+AG-UI and knows nothing about Slack, so each of these is registered on the
+channel as a **tool** (`channel/src/ui-tools.tsx`): the SDK turns every entry in
+`components`/`tools` into a tool descriptor sent on each run, the Antigravity
+adapter exposes it to the model as a client-side tool, and the call parks until
+this side renders it and answers.
+
+| Tool | Renders | Notes |
+|---|---|---|
+| `show_image` | Block Kit image | URL must be public https — Slack fetches it server-side. |
+| `show_table` | Block Kit table | Up to 6 columns, 20 rows. |
+| `ask_choice` | Buttons, or a menu above 5 options | Does not return the pick — see below. |
+
+Nothing in the system prompt mentions them; the tool descriptions are what
+teach the model when to reach for one.
+
+### Two limits worth knowing
+
+**`ask_choice` cannot wait for the click.** `Thread.awaitChoice()` rejects on
+managed Channels — `channels-intelligence` declares
+`supportsBlockingChoice: false` — so the handler posts the controls and returns
+a note telling the model to stop. Clicking calls `runAgent({ prompt })`, which
+injects the choice as a user message and starts a fresh turn. The practical
+effect is that a pick reads as if the user typed it. Inline click handlers route
+in-process only and are dropped after a restart, which is why the posted message
+also invites a typed answer.
+
+**No charts.** The Slack Block Kit renderer has cases for image, table, actions,
+button, select and input, but none for `chart`, and the renderer is total — a
+`<Chart>` is skipped silently, which would look like the agent ignoring the
+request. `show_table` covers structured numbers instead.
+
 ## Human-in-the-loop
 
 **Currently off.** `AGENT_TOOL_APPROVAL=false` with `AGENT_TOOLS=full` means
