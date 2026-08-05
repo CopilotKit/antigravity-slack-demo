@@ -5,7 +5,7 @@ services:
   - type: pserv
     name: antigravity-agent
     runtime: docker
-    repo: https://github.com/copilotkit/internal-antigravity-slack-channel
+    repo: https://github.com/mme/internal-antigravity-slack-channel
     region: oregon
     plan: starter
     dockerfilePath: ./agent/Dockerfile
@@ -41,7 +41,7 @@ services:
   - type: worker
     name: antigravity-channel
     runtime: docker
-    repo: https://github.com/copilotkit/internal-antigravity-slack-channel
+    repo: https://github.com/mme/internal-antigravity-slack-channel
     region: oregon
     plan: starter
     dockerfilePath: ./channel/Dockerfile
