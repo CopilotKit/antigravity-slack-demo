@@ -21,5 +21,9 @@ ENV AGENT_WORKSPACE=/data/ws \
     AGENT_SAVE_DIR=/data/save \
     PYTHONUNBUFFERED=1
 
+# Render injects PORT (10000 by default) and routes the service's internal
+# address to it. Bind that rather than a fixed port, or the internal hostname
+# resolves to a port nothing is listening on.
+ENV PORT=8027
 EXPOSE 8027
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8027"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8027}"]

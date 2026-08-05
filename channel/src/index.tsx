@@ -31,9 +31,26 @@ function required(names: string[], hint: string): string {
 
 const CHANNEL_NAME = process.env.CHANNEL_NAME?.trim() || "antigravity";
 
-/** Internal Render address of the agent service; localhost in development. */
-const AGENT_URL =
-  process.env.ANTIGRAVITY_URL?.trim() || "http://127.0.0.1:8027/slack";
+/** Path the agent is mounted at, matching `create_antigravity_app` in app.py. */
+const AGENT_PATH = "/slack";
+
+/**
+ * Where the agent lives.
+ *
+ * On Render, `AGENT_HOSTPORT` is resolved from the private service at deploy
+ * time — the internal hostname carries a generated suffix and the port is
+ * Render's, not the one the Dockerfile exposes, so neither can be hardcoded.
+ * `ANTIGRAVITY_URL` overrides everything, and localhost is the dev default.
+ */
+function resolveAgentUrl(): string {
+  const explicit = process.env.ANTIGRAVITY_URL?.trim();
+  if (explicit) return explicit;
+  const hostport = process.env.AGENT_HOSTPORT?.trim();
+  if (hostport) return `http://${hostport}${AGENT_PATH}`;
+  return `http://127.0.0.1:8027${AGENT_PATH}`;
+}
+
+const AGENT_URL = resolveAgentUrl();
 
 /**
  * One agent per Slack thread.

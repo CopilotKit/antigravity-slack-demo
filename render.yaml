@@ -51,6 +51,11 @@ services:
         sync: false
       - key: CHANNEL_NAME
         value: antigravity
-      # Render's internal address for the service above.
-      - key: ANTIGRAVITY_URL
-        value: http://antigravity-agent:8027/slack
+      # Render appends a suffix to the internal hostname and routes it on its
+      # own port, so neither can be hardcoded -- `fromService` resolves the
+      # real host:port at deploy time. The code builds the URL around it.
+      - key: AGENT_HOSTPORT
+        fromService:
+          name: antigravity-agent
+          type: pserv
+          property: hostport
