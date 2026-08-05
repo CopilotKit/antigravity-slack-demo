@@ -72,7 +72,11 @@ const channel = createChannel({
  * reply and then leaves Slack's typing indicator spinning is indistinguishable
  * from one still doing work: both are silence.
  */
-async function traced(label: string, run: () => Promise<void>): Promise<void> {
+async function traced(
+  label: string,
+  // runAgent resolves to a MessageRef, not void; the result is unused here.
+  run: () => Promise<unknown>,
+): Promise<void> {
   const started = Date.now();
   console.log(`[${label}] runAgent →`);
   try {
