@@ -82,29 +82,59 @@ function normalizeImageUrl(raw: string): string | null {
 }
 
 /**
- * Check Slack will be able to fetch it, before handing Slack something fatal.
+ * Identify ourselves when probing. Wikimedia — and other large hosts — answer
+ * an unidentified client with 400 or 403, which made the probe below reject
+ * URLs that Slack itself fetches without trouble.
+ */
+const PROBE_HEADERS = {
+  "user-agent":
+    "antigravity-slack-demo/1.0 (+https://github.com/CopilotKit/antigravity-slack-demo)",
+  accept: "image/*,*/*;q=0.8",
+};
+
+/** Some hosts reject HEAD outright; ask for a single byte instead. */
+async function probe(url: string, method: "HEAD" | "GET"): Promise<Response> {
+  return fetch(url, {
+    method,
+    redirect: "follow",
+    signal: AbortSignal.timeout(5_000),
+    headers:
+      method === "GET"
+        ? { ...PROBE_HEADERS, range: "bytes=0-0" }
+        : PROBE_HEADERS,
+  });
+}
+
+/**
+ * Check the URL looks fetchable, and say why not in terms the model can act on.
  *
- * Returns an explanation for the model, or `null` when the URL looks good.
+ * Deliberately biased towards posting. A malformed URL is fatal — Slack
+ * rejects the block and aborts the run — but that case is already handled by
+ * {@link normalizeImageUrl}; a well-formed URL that merely 500s costs at worst
+ * a broken thumbnail. So only a definite "this is not an image" refuses:
+ * anything ambiguous (405, 403, a host that dislikes probes) is allowed
+ * through rather than risking a false rejection, which is what sent an earlier
+ * run off mirroring the file to a third-party host.
  */
 async function imageFetchProblem(url: string): Promise<string | null> {
   let response: Response;
   try {
-    response = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      signal: AbortSignal.timeout(5_000),
-    });
+    response = await probe(url, "HEAD");
+    // Method-not-allowed and friends say nothing about the image itself.
+    if (response.status >= 400) response = await probe(url, "GET");
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    return `Could not reach ${url} (${reason}). Slack fetches images server-side, so the link must be publicly accessible. Nothing was posted.`;
+    return `Could not reach ${url} (${reason}). Slack fetches images server-side, so the link must be publicly reachable. Nothing was posted - do not try to mirror or re-upload the file, just use a different URL or tell the user.`;
   }
-  if (!response.ok) {
-    return `${url} returned HTTP ${response.status}. Slack could not load it either, so nothing was posted. Use a different URL.`;
+
+  if (response.status === 404 || response.status === 410) {
+    return `${url} returned HTTP ${response.status} - there is nothing there. Nothing was posted; use a different URL or tell the user.`;
   }
+
   const contentType = response.headers.get("content-type") ?? "";
-  // A 200 that serves HTML is the usual shape of a link to a *page* about an
-  // image rather than the image file.
-  if (contentType && !contentType.startsWith("image/")) {
+  // A 200 serving HTML is the usual shape of a link to a *page about* an image
+  // rather than the image file itself.
+  if (response.ok && contentType && !contentType.startsWith("image/")) {
     return `${url} serves "${contentType}", not an image. Link directly to the image file. Nothing was posted.`;
   }
   return null;
