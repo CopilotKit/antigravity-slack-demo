@@ -35,4 +35,32 @@ t("a short name that is not an id survives", personName({ user: null, actor: { n
 t("mention only without a name", personMarkdown("", "U06GTJE08F4"), "<@U06GTJE08F4>");
 t("name is not turned into a ping", personMarkdown("Markus", "U06GTJE08F4"), "Markus");
 
+// --- id extraction + item summary (appended) -------------------------------
+function slackUserId(id: string): string | undefined {
+  const last = id.split(":").pop()?.trim() ?? "";
+  return /^[UW][A-Z0-9]{6,}$/.test(last) ? last : undefined;
+}
+const pm = (name: string, id: string) => {
+  if (name) return name;
+  const s = slackUserId(id);
+  return s ? `<@${s}>` : id;
+};
+function summariseItems(items: string[]): string {
+  const counts = new Map<string, number>();
+  for (const i of items) counts.set(i, (counts.get(i) ?? 0) + 1);
+  return [...counts].map(([n, c]) => (c > 1 ? `${n} x${c}` : n)).join(", ");
+}
+
+// The reported case: composite id must yield a resolvable mention.
+t("extracts the slack id from the composite", slackUserId("slack:unknown:U06GTJE08F4"), "U06GTJE08F4");
+t("composite becomes a real mention", pm("", "slack:unknown:U06GTJE08F4"), "<@U06GTJE08F4>");
+t("bare slack id also works", slackUserId("U06GTJE08F4"), "U06GTJE08F4");
+t("non-slack id yields no mention", pm("", "teams:unknown:abc"), "teams:unknown:abc");
+t("a known name still beats a mention", pm("Martha", "slack:unknown:U06GTJE08F4"), "Martha");
+
+t("repeats collapse", summariseItems(["Tom Yum Soup", "Tom Yum Soup", "Spring Rolls (4)"]),
+  "Tom Yum Soup x2, Spring Rolls (4)");
+t("singles unchanged", summariseItems(["Pad Thai"]), "Pad Thai");
+t("order preserved", summariseItems(["B", "A", "B"]), "B x2, A");
+
 process.exit(fails ? 1 : 0);

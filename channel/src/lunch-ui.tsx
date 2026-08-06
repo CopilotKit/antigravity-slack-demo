@@ -24,7 +24,6 @@
 import {
   Actions,
   Button,
-  Cell,
   Context,
   Divider,
   Field,
@@ -33,9 +32,7 @@ import {
   Image,
   Markdown,
   Message,
-  Row,
   Section,
-  Table,
   defineChannelComponent,
   defineChannelTool,
 } from "@copilotkit/channels";
@@ -95,13 +92,40 @@ function personName(ctx: {
 }
 
 /**
+ * Dig the Slack user id out of the channel's canonical id.
+ *
+ * The managed adapter hands us a composite like `slack:unknown:U06GTJE08F4`
+ * ("unknown" being the unresolved actor kind), and `thread.lookupUser` is
+ * hardcoded to return undefined there, so no name can be fetched. The last
+ * segment is the genuine Slack id though, and Slack renders `<@U…>` as the
+ * person's current display name -- which makes a mention the only route to a
+ * real name on this surface.
+ */
+function slackUserId(id: string): string | undefined {
+  const last = id.split(":").pop()?.trim() ?? "";
+  return /^[UW][A-Z0-9]{6,}$/.test(last) ? last : undefined;
+}
+
+/**
  * How to refer to someone in *markdown*, where Slack resolves mentions.
  *
- * Only falls back to a mention when there is no name: a mention notifies, and
- * pinging someone every time they add a spring roll is not a feature.
+ * A known name wins: a mention notifies, and we would rather not ping someone
+ * merely for appearing in a summary. Without one, a mention beats printing an
+ * opaque id at them.
  */
 function personMarkdown(name: string, id: string): string {
-  return name || `<@${id}>`;
+  if (name) return name;
+  const slackId = slackUserId(id);
+  return slackId ? `<@${slackId}>` : id;
+}
+
+/** "Tom Yum Soup, Tom Yum Soup" reads as a mistake; "Tom Yum Soup x2" reads as an order. */
+function summariseItems(items: string[]): string {
+  const counts = new Map<string, number>();
+  for (const item of items) counts.set(item, (counts.get(item) ?? 0) + 1);
+  return [...counts]
+    .map(([name, n]) => (n > 1 ? `${name} x${n}` : name))
+    .join(", ");
 }
 
 function money(cents: number): string {
@@ -316,7 +340,12 @@ export const ShowMenu = defineChannelTool({
                 await ctx.thread.post(
                   <Message>
                     <Context>
-                      {`${personMarkdown(who, whoId)} added ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
+                      {/* No mention here even when the name is unknown. This
+                          fires on every click, and a mention notifies -- being
+                          pinged eight times because colleagues are picking
+                          lunch is worse than an unattributed line. The round
+                          summary names everyone once. */}
+                      {`${who ? `${who} added` : "Added"} ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
                     </Context>
                   </Message>,
                 );
@@ -363,19 +392,20 @@ export const ShowRound = defineChannelTool({
     await thread.post(
       <Message>
         <Header>{`${round.restaurantName} — the round so far`}</Header>
-        <Table
-          columns={[{ header: "Who" }, { header: "Order" }, { header: "Subtotal" }]}
-        >
-          {people.map((p) => (
-            <Row>
-              {/* Slack table cells are raw_text, so a <@id> mention would show
-                  literally. Without a name the bare id is the honest option. */}
-              <Cell>{p.name || p.id}</Cell>
-              <Cell>{p.items.join(", ")}</Cell>
-              <Cell>{money(p.cents)}</Cell>
-            </Row>
-          ))}
-        </Table>
+        {/* Markdown rather than a Table on purpose. Slack renders table cells
+            as raw_text, which cannot resolve a <@id> mention -- and a mention
+            is the only way to show a real name here, since the adapter gives
+            us an opaque id and no display name. Names beat column alignment. */}
+        <Section>
+          <Markdown>
+            {people
+              .map(
+                (p) =>
+                  `• ${personMarkdown(p.name, p.id)} — ${summariseItems(p.items)} — *${money(p.cents)}*`,
+              )
+              .join("\n")}
+          </Markdown>
+        </Section>
         <Fields>
           <Field label="People">{String(people.length)}</Field>
           <Field label="Items">{String(round.items.length)}</Field>
@@ -384,7 +414,20 @@ export const ShowRound = defineChannelTool({
         {round.placedAt ? (
           <Context>{`Placed — order ${round.orderNumber}.`}</Context>
         ) : (
-          <Context>Say "place the order" when everyone is in.</Context>
+          <Actions>
+            <Button
+              style="primary"
+              value="review"
+              onClick={async (ctx) => {
+                await postOrderGate(ctx.thread);
+              }}
+            >
+              Place order…
+            </Button>
+          </Actions>
+        )}
+        {round.placedAt ? null : (
+          <Context>Or just say "place the order" when everyone is in.</Context>
         )}
       </Message>,
     );
@@ -417,11 +460,29 @@ export const ConfirmOrder = defineChannelTool({
     if (round.placedAt) {
       return `Already placed as ${round.orderNumber}. Say so; do not offer to place it again.`;
     }
+    const posted = await postOrderGate(thread);
+    return `Posted the confirmation for ${posted}. Your turn ends here - someone has to click. Do not say the order is placed.`;
+  },
+});
 
-    const people = byPerson(round);
-    const total = totalCents(round);
+/**
+ * Posts the confirm/cancel gate.
+ *
+ * Shared by `confirm_order` and the "Place order…" button on the round, so
+ * asking for it and clicking for it land on exactly the same gate. Returns a
+ * short description of what was posted, or null when there is nothing to
+ * place.
+ *
+ * A function declaration, so `show_round` above can reference it.
+ */
+async function postOrderGate(thread: Thread): Promise<string | null> {
+  const round = await readRound(thread);
+  if (!round || round.items.length === 0 || round.placedAt) return null;
 
-    await thread.post(
+  const people = byPerson(round);
+  const total = totalCents(round);
+
+  await thread.post(
       <Message accent="#E01E5A">
         <Header>Place this order?</Header>
         <Section>
@@ -432,7 +493,7 @@ export const ConfirmOrder = defineChannelTool({
         <Section>
           <Markdown>
             {people
-              .map((p) => `• ${personMarkdown(p.name, p.id)}: ${p.items.join(", ")}`)
+              .map((p) => `• ${personMarkdown(p.name, p.id)}: ${summariseItems(p.items)}`)
               .join("\n")}
           </Markdown>
         </Section>
@@ -503,9 +564,8 @@ export const ConfirmOrder = defineChannelTool({
       </Message>,
     );
 
-    return `Posted the confirmation for ${round.restaurantName}, ${money(total)}. Your turn ends here - someone has to click. Do not say the order is placed.`;
-  },
-});
+  return `${round.restaurantName}, ${money(total)}`;
+}
 
 export const LUNCH_COMPONENTS = [ShowRestaurants];
 export const LUNCH_TOOLS = [ShowMenu, ShowRound, ConfirmOrder];
