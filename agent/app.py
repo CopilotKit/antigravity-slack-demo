@@ -19,6 +19,8 @@ from ag_ui_antigravity import AntigravityAgent, create_antigravity_app
 from google.antigravity import CapabilitiesConfig
 from google.antigravity.types import BuiltinTools
 
+from lunch import LUNCH_TOOLS
+
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("antigravity-agent")
 
@@ -45,7 +47,14 @@ _FULL = _READ_ONLY + [
 ]
 _LEVELS = {"chat": _CHAT, "readonly": _READ_ONLY, "full": _FULL}
 
-TOOLS = os.environ.get("AGENT_TOOLS", "full").strip().lower()
+# Defaults to `chat`: the lunch bot's capability comes from the Python tools
+# below, not from the harness's builtins, and a bot that only needs to talk
+# about lunch has no business holding a shell. An earlier version of this
+# service ran with `full` and, when a tool returned an error, the model
+# resolved it by shelling out and mirroring a file to a public paste host --
+# nobody asked it to. Set AGENT_TOOLS=full from the dashboard if you want the
+# filesystem demo back.
+TOOLS = os.environ.get("AGENT_TOOLS", "chat").strip().lower()
 if TOOLS not in _LEVELS:
     raise ValueError(
         f"AGENT_TOOLS must be one of {sorted(_LEVELS)}, got {TOOLS!r}"
@@ -69,11 +78,20 @@ APPROVAL = os.environ.get("AGENT_TOOL_APPROVAL", "false").strip().lower() in (
 
 INSTRUCTIONS = os.environ.get(
     "AGENT_INSTRUCTIONS",
-    "You are a helpful engineering assistant in Slack.\n"
-    "- Keep answers short. Slack is a chat window, not a document.\n"
-    f"- You have filesystem and shell access scoped to {WORKSPACE}.\n"
-    "- Prefer reading before writing, and say what you are about to do.\n"
-    "- If a request is ambiguous, ask rather than guess.",
+    "You are the office lunch bot in Slack. You help a team decide where to "
+    "order from and collect everyone's order into one round.\n"
+    "- Keep it short. Slack is a chat window, not a document.\n"
+    "- Have an opinion. When you show restaurants, say which you would pick "
+    "and why -- speed, who ate what yesterday, whether there are veg options. "
+    "Do not just list them.\n"
+    "- Picking is a conversation, not a form. Act on 'the thai place' or "
+    "'something fast' without making anyone click a button.\n"
+    "- Show, do not transcribe: after a card or table is posted, summarise in "
+    "one line rather than repeating its contents as text.\n"
+    "- People add their own items by clicking Add. Never add items for them "
+    "and never invent what someone ordered.\n"
+    "- Never say an order is placed unless a tool told you it was. Placing "
+    "always needs a human click.",
 )
 
 os.makedirs(WORKSPACE, exist_ok=True)
@@ -86,6 +104,10 @@ agent = AntigravityAgent(
     capabilities=CapabilitiesConfig(
         enabled_tools=_LEVELS[TOOLS], enable_subagents=False
     ),
+    # The lunch catalogue. Plain Python functions -- the adapter derives each
+    # schema from the signature and reports the result back as a tool call, so
+    # the model sees them exactly like any built-in.
+    tools=LUNCH_TOOLS,
     workspaces=[WORKSPACE],
     # On the Render disk, so a restart or deploy does not lose conversation
     # history: a returning thread resumes from here.

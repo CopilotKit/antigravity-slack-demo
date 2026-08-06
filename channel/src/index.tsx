@@ -16,6 +16,7 @@ import { createChannel } from "@copilotkit/channels";
 import { Actions, Button, Markdown, Message, Section } from "@copilotkit/channels/ui";
 import { HttpAgent } from "@ag-ui/client";
 import { UI_COMPONENTS, UI_TOOLS } from "./ui-tools.js";
+import { LUNCH_COMPONENTS, LUNCH_TOOLS } from "./lunch-ui.js";
 import {
   CopilotKitIntelligence,
   CopilotRuntime,
@@ -68,8 +69,8 @@ const channel = createChannel({
   // sent on every run, which the Antigravity adapter turns into client-side
   // tools the model can call -- so the agent posts images and pickers itself
   // rather than describing them in text. See ui-tools.tsx.
-  components: UI_COMPONENTS,
-  tools: UI_TOOLS,
+  components: [...UI_COMPONENTS, ...LUNCH_COMPONENTS],
+  tools: [...UI_TOOLS, ...LUNCH_TOOLS],
 });
 
 /**
