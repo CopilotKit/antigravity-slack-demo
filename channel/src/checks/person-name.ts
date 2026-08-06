@@ -63,4 +63,22 @@ t("repeats collapse", summariseItems(["Tom Yum Soup", "Tom Yum Soup", "Spring Ro
 t("singles unchanged", summariseItems(["Pad Thai"]), "Pad Thai");
 t("order preserved", summariseItems(["B", "A", "B"]), "B x2, A");
 
+// personTag: the reported bug -- "Confirmed by: Someone" when an id was right there.
+const personTag = (ctx: any) => {
+  const name = personName(ctx);
+  const id = ctx.user?.id ?? ctx.actor.id;
+  return pm(name, id);
+};
+
+t("tags the real user when only a composite id exists",
+  personTag({ user: { id: "slack:unknown:U06GTJE08F4", name: "U06GTJE08F4" }, actor: { id: "slack:unknown:U06GTJE08F4" } }),
+  "<@U06GTJE08F4>");
+t("prefers a display name over a ping",
+  personTag({ user: { id: "slack:unknown:U06GTJE08F4" }, actor: { id: "x", name: "Markus Ecker" } }),
+  "Markus Ecker");
+t("falls back to actor id when user id is absent",
+  personTag({ user: null, actor: { id: "slack:unknown:W0123456" } }), "<@W0123456>");
+t("never yields the literal Someone",
+  personTag({ user: null, actor: { id: "slack:unknown:U06GTJE08F4" } }) === "Someone", false);
+
 process.exit(fails ? 1 : 0);

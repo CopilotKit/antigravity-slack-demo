@@ -150,6 +150,20 @@ function personMarkdown(name: string, id: string): string {
 }
 
 /**
+ * How to name whoever caused an event, ready to drop into markdown.
+ *
+ * Every attribution goes through this, so nobody is ever "Someone" while a
+ * usable id is sitting right there on the context. Safe in a `<Field>` too:
+ * Slack lowers field text to mrkdwn, so the mention resolves.
+ */
+function personTag(ctx: {
+  user?: { id?: string; name?: string } | null;
+  actor: { id: string; name?: string; handle?: string };
+}): string {
+  return personMarkdown(personName(ctx), ctx.user?.id ?? ctx.actor.id);
+}
+
+/**
  * Take one line back out of the round.
  *
  * Keyed by `lineId` rather than item name, so removing one of two identical
@@ -163,8 +177,8 @@ export async function removeLine(
   ctx: {
     thread: Thread;
     message?: { ref?: unknown };
-    user?: { name?: string } | null;
-    actor: { name?: string; handle?: string };
+    user?: { id?: string; name?: string } | null;
+    actor: { id: string; name?: string; handle?: string };
   },
   lineId: string,
   itemName: string,
@@ -206,9 +220,9 @@ export async function removeLine(
 
   round.items.splice(index, 1);
   await ctx.thread.setState<Round>(round);
-  const who = personName(ctx);
+  const who = personTag(ctx);
   await note(
-    `${who || "Someone"} removed ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} left in the round.`,
+    `${who} removed ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} left in the round.`,
   );
 }
 
@@ -796,7 +810,7 @@ async function postOrderGate(thread: Thread): Promise<string | null> {
               current.attempts = attempt;
               delete current.cancelledAt;
               await ctx.thread.setState<Round>(current);
-              const who = personName(ctx) || "Someone";
+              const who = personTag(ctx);
               await ctx.thread.post(
                 <Message accent="#2EB67D">
                   <Header>Order placed</Header>
@@ -828,7 +842,7 @@ async function postOrderGate(thread: Thread): Promise<string | null> {
               await ctx.thread.post(
                 <Message>
                   <Context>
-                    {`${personName(ctx) || "Someone"} cancelled — the round is still open.`}
+                    {`${personTag(ctx)} cancelled — the round is still open.`}
                   </Context>
                 </Message>,
               );
@@ -898,7 +912,7 @@ export const CancelOrder = defineChannelTool({
     "has been placed, say so rather than clearing the round.",
   parameters: z.object({}),
   async handler(_args, { thread, ...ctx }) {
-    return cancelPlacedOrder(thread, personName(ctx) || "Someone");
+    return cancelPlacedOrder(thread, personTag(ctx));
   },
 });
 
