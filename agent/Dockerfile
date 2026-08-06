@@ -12,7 +12,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+# Every module, not just app.py: a second file used to be one COPY away from a
+# ModuleNotFoundError that only shows up at deploy time.
+COPY *.py ./
 
 # /data is the Render disk: the agent's workspace and its saved trajectories.
 # Declared so the image still runs without one mounted.
