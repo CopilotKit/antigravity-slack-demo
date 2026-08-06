@@ -164,7 +164,13 @@ export const ShowRestaurants = defineChannelComponent({
             <Markdown>{r.blurb}</Markdown>
           </Section>,
           <Actions>
+            {/* A registered component binds handlers by JSX key, not by tree
+                position, so that a click still resolves after a restart. The
+                key is required and must be unique: without it the whole
+                render throws inside the run loop, which posts nothing and
+                logs nothing. */}
             <Button
+              key={`choose-${r.id}`}
               value={`${r.id}|${r.name}`}
               onClick={async (ctx) => {
                 const [, name] = String(ctx.action.value).split("|");
