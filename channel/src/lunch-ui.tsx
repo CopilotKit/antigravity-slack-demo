@@ -68,6 +68,42 @@ async function readRound(thread: Thread): Promise<Round | undefined> {
   return (await thread.state<Round>()) ?? undefined;
 }
 
+/** Slack ids: U/W for people, B for bots. Never a name anyone chose. */
+const LOOKS_LIKE_AN_ID = /^[UWB][A-Z0-9]{6,}$/;
+
+/**
+ * Best human-readable name for whoever caused an event.
+ *
+ * `actor` first, deliberately. The channel runs with `identifyUser: "platform"`,
+ * which makes the canonical `user.name` the *platform id* -- so preferring it
+ * put "U06GTJE08F4" in the round table instead of a name. The provider's
+ * display name lives on `actor`.
+ *
+ * Returns an empty string when nothing usable exists, leaving the caller to
+ * decide: a table cell renders as raw_text and cannot show a mention, while
+ * markdown can.
+ */
+function personName(ctx: {
+  user?: { name?: string } | null;
+  actor: { name?: string; handle?: string };
+}): string {
+  for (const candidate of [ctx.actor.name, ctx.actor.handle, ctx.user?.name]) {
+    const value = candidate?.trim();
+    if (value && !LOOKS_LIKE_AN_ID.test(value)) return value;
+  }
+  return "";
+}
+
+/**
+ * How to refer to someone in *markdown*, where Slack resolves mentions.
+ *
+ * Only falls back to a mention when there is no name: a mention notifies, and
+ * pinging someone every time they add a spring roll is not a feature.
+ */
+function personMarkdown(name: string, id: string): string {
+  return name || `<@${id}>`;
+}
+
 function money(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
@@ -82,16 +118,20 @@ function totalCents(round: Round): number {
  * Sorting by name would reshuffle the table every time someone adds an item,
  * which reads as the bot losing track.
  */
-function byPerson(round: Round): { name: string; items: string[]; cents: number }[] {
+function byPerson(
+  round: Round,
+): { id: string; name: string; items: string[]; cents: number }[] {
   const order: string[] = [];
-  const seen = new Map<string, { name: string; items: string[]; cents: number }>();
+  const seen = new Map<string, { id: string; name: string; items: string[]; cents: number }>();
   for (const item of round.items) {
     let entry = seen.get(item.userId);
     if (!entry) {
-      entry = { name: item.userName, items: [], cents: 0 };
+      entry = { id: item.userId, name: item.userName, items: [], cents: 0 };
       seen.set(item.userId, entry);
       order.push(item.userId);
     }
+    // A later click may carry a name an earlier one lacked.
+    if (!entry.name && item.userName) entry.name = item.userName;
     entry.items.push(item.itemName);
     entry.cents += item.priceCents;
   }
@@ -256,8 +296,8 @@ export const ShowMenu = defineChannelTool({
                   );
                   return;
                 }
-                const who = ctx.user?.name ?? ctx.actor.name ?? ctx.actor.handle ?? "Someone";
                 const whoId = ctx.user?.id ?? ctx.actor.id;
+                const who = personName(ctx);
                 round.items.push({
                   userId: whoId,
                   userName: who,
@@ -269,7 +309,7 @@ export const ShowMenu = defineChannelTool({
                 await ctx.thread.post(
                   <Message>
                     <Context>
-                      {`${who} added ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
+                      {`${personMarkdown(who, whoId)} added ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
                     </Context>
                   </Message>,
                 );
@@ -321,7 +361,9 @@ export const ShowRound = defineChannelTool({
         >
           {people.map((p) => (
             <Row>
-              <Cell>{p.name}</Cell>
+              {/* Slack table cells are raw_text, so a <@id> mention would show
+                  literally. Without a name the bare id is the honest option. */}
+              <Cell>{p.name || p.id}</Cell>
               <Cell>{p.items.join(", ")}</Cell>
               <Cell>{money(p.cents)}</Cell>
             </Row>
@@ -381,7 +423,11 @@ export const ConfirmOrder = defineChannelTool({
           </Markdown>
         </Section>
         <Section>
-          <Markdown>{people.map((p) => `• ${p.name}: ${p.items.join(", ")}`).join("\n")}</Markdown>
+          <Markdown>
+            {people
+              .map((p) => `• ${personMarkdown(p.name, p.id)}: ${p.items.join(", ")}`)
+              .join("\n")}
+          </Markdown>
         </Section>
         <Actions>
           <Button
@@ -412,7 +458,7 @@ export const ConfirmOrder = defineChannelTool({
               current.placedAt = new Date().toISOString();
               current.orderNumber = orderNumber;
               await ctx.thread.setState<Round>(current);
-              const who = ctx.user?.name ?? ctx.actor.name ?? "Someone";
+              const who = personName(ctx) || "Someone";
               await ctx.thread.post(
                 <Message accent="#2EB67D">
                   <Header>Order placed</Header>
@@ -438,7 +484,7 @@ export const ConfirmOrder = defineChannelTool({
               await ctx.thread.post(
                 <Message>
                   <Context>
-                    {`${ctx.user?.name ?? "Someone"} cancelled — the round is still open.`}
+                    {`${personName(ctx) || "Someone"} cancelled — the round is still open.`}
                   </Context>
                 </Message>,
               );
