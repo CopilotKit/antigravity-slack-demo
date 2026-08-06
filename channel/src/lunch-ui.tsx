@@ -45,11 +45,21 @@ import { z } from "zod";
 
 /** One person's one item. Quantity is repetition, so removing is unambiguous. */
 interface RoundItem {
+  /** Unique per click, so Remove takes out that line and not a twin of it. */
+  lineId: string;
   userId: string;
   userName: string;
   itemId: string;
   itemName: string;
   priceCents: number;
+}
+
+/** Unique enough to key one line of a lunch order. */
+function newLineId(): string {
+  return (
+    globalThis.crypto?.randomUUID?.() ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  );
 }
 
 interface Round {
@@ -122,6 +132,69 @@ function personMarkdown(name: string, id: string): string {
   if (name) return name;
   const slackId = slackUserId(id);
   return slackId ? `<@${slackId}>` : id;
+}
+
+/**
+ * Take one line back out of the round.
+ *
+ * Keyed by `lineId` rather than item name, so removing one of two identical
+ * dishes takes out the one that was clicked and leaves the other alone.
+ *
+ * Rewrites the original acknowledgement in place where the surface allows it,
+ * so an undone pick does not leave a stale "added" line sitting in the thread
+ * above its own retraction.
+ */
+export async function removeLine(
+  ctx: {
+    thread: Thread;
+    message?: { ref?: unknown };
+    user?: { name?: string } | null;
+    actor: { name?: string; handle?: string };
+  },
+  lineId: string,
+  itemName: string,
+): Promise<void> {
+  const round = await readRound(ctx.thread);
+  if (!round) return;
+
+  const note = async (text: string): Promise<void> => {
+    const ui = (
+      <Message>
+        <Context>{text}</Context>
+      </Message>
+    );
+    const ref = ctx.message?.ref;
+    if (ref) {
+      // update() is capability-gated; fall back rather than lose the message.
+      try {
+        await ctx.thread.update(ref as never, ui);
+        return;
+      } catch {
+        /* fall through to a fresh post */
+      }
+    }
+    await ctx.thread.post(ui);
+  };
+
+  if (round.placedAt) {
+    await note(
+      `The order already went in (${round.orderNumber}) — too late to remove ${itemName}.`,
+    );
+    return;
+  }
+
+  const index = round.items.findIndex((item) => item.lineId === lineId);
+  if (index === -1) {
+    await note(`${itemName} was already removed.`);
+    return;
+  }
+
+  round.items.splice(index, 1);
+  await ctx.thread.setState<Round>(round);
+  const who = personName(ctx);
+  await note(
+    `${who || "Someone"} removed ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} left in the round.`,
+  );
 }
 
 /**
@@ -353,7 +426,9 @@ export const ShowMenu = defineChannelTool({
                 }
                 const whoId = ctx.user?.id ?? ctx.actor.id;
                 const who = personName(ctx);
+                const lineId = newLineId();
                 round.items.push({
+                  lineId,
                   userId: whoId,
                   userName: who,
                   itemId,
@@ -363,14 +438,25 @@ export const ShowMenu = defineChannelTool({
                 await ctx.thread.setState<Round>(round);
                 await ctx.thread.post(
                   <Message>
-                    <Context>
-                      {/* No mention here even when the name is unknown. This
-                          fires on every click, and a mention notifies -- being
-                          pinged eight times because colleagues are picking
-                          lunch is worse than an unattributed line. The round
-                          summary names everyone once. */}
-                      {`${who ? `${who} added` : "Added"} ${itemName} — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
-                    </Context>
+                    <Section>
+                      <Markdown>
+                        {/* A mention is the only way to show a real name here:
+                            the adapter gives us an opaque id and no display
+                            name. It notifies, which is the price of saying who
+                            ordered what. */}
+                        {`${personMarkdown(who, whoId)} added *${itemName}* — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
+                      </Markdown>
+                    </Section>
+                    <Actions>
+                      <Button
+                        value={lineId}
+                        onClick={async (undo) => {
+                          await removeLine(undo, String(undo.action.value), itemName);
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </Actions>
                   </Message>,
                 );
               }}
@@ -563,20 +649,14 @@ async function postOrderGate(thread: Thread): Promise<string | null> {
                     <Field label="Total">{money(totalCents(current))}</Field>
                     <Field label="Confirmed by">{who}</Field>
                   </Fields>
-                  <Actions>
-                    <Button
-                      style="danger"
-                      value={orderNumber}
-                      onClick={async (c2) => {
-                        await cancelPlacedOrder(c2.thread, personName(c2) || "Someone");
-                      }}
-                    >
-                      Cancel order
-                    </Button>
-                  </Actions>
+                  {/* No cancel button here on purpose: once it is placed, the
+                      order is done as far as the thread is concerned. The
+                      cancel_order tool still exists for the rare "actually,
+                      call it off" -- asking for it is deliberate in a way that
+                      a button sitting under a confirmation is not. */}
                   <Context>
                     Simulated — this demo has no ordering backend, so no food is on its
-                    way. Cancelling reopens the round with everyone's picks intact.
+                    way.
                   </Context>
                 </Message>,
               );

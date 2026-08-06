@@ -1,5 +1,5 @@
 /** Drives the real cancel_order handler through the place/cancel state machine. */
-import { CancelOrder, mintOrderNumber } from "../lunch-ui.js";
+import { CancelOrder, mintOrderNumber, removeLine } from "../lunch-ui.js";
 
 type Round = Record<string, any>;
 
@@ -26,8 +26,8 @@ const placedRound = (): Round => ({
   restaurantId: "bangkok-kitchen",
   restaurantName: "Bangkok Kitchen",
   items: [
-    { userId: "u1", userName: "Martha", itemId: "bk-pad-thai", itemName: "Pad Thai", priceCents: 1650 },
-    { userId: "u2", userName: "Jordan", itemId: "bk-tom-yum", itemName: "Tom Yum Soup", priceCents: 1100 },
+    { lineId: "L1", userId: "u1", userName: "Martha", itemId: "bk-pad-thai", itemName: "Pad Thai", priceCents: 1650 },
+    { lineId: "L2", userId: "u2", userName: "Jordan", itemId: "bk-tom-yum", itemName: "Tom Yum Soup", priceCents: 1100 },
   ],
   placedAt: "2026-08-06T10:00:00.000Z",
   orderNumber: "LN-ABC123",
@@ -85,6 +85,37 @@ const check = (name: string, ok: boolean, detail = "") => {
   check("re-place mints a new number", first !== second, `${first} vs ${second}`);
   check("same attempt is stable", mintOrderNumber(ids, "bangkok-kitchen", 1) === first);
   check("number looks quotable", /^LN-[0-9A-Z]{1,6}$/.test(first), first);
+}
+
+// 6. Removing one line takes out that line only.
+{
+  const open = placedRound(); delete open.placedAt; delete open.orderNumber;
+  open.items.push({ lineId: "L3", userId: "u1", userName: "Martha", itemId: "bk-pad-thai", itemName: "Pad Thai", priceCents: 1650 });
+  const f = fakeThread(open);
+  await removeLine({ ...ctx(f.thread), thread: f.thread } as any, "L1", "Pad Thai");
+  const left = f.state_!.items.map((i: any) => i.lineId);
+  check("removes the clicked line", !left.includes("L1"), left.join(","));
+  check("its identical twin survives", left.includes("L3"), left.join(","));
+  check("other people untouched", left.includes("L2"), left.join(","));
+}
+
+// 7. Removing the same line twice is not a double-removal.
+{
+  const open = placedRound(); delete open.placedAt; delete open.orderNumber;
+  const f = fakeThread(open);
+  await removeLine({ ...ctx(f.thread), thread: f.thread } as any, "L1", "Pad Thai");
+  const after = f.state_!.items.length;
+  await removeLine({ ...ctx(f.thread), thread: f.thread } as any, "L1", "Pad Thai");
+  check("second remove is a no-op", f.state_!.items.length === after, `${f.state_!.items.length} items`);
+  check("says it was already removed", f.posts.at(-1)!.includes("already removed"), f.posts.at(-1)!);
+}
+
+// 8. Removing after placing must not alter a placed order.
+{
+  const f = fakeThread(placedRound());
+  await removeLine({ ...ctx(f.thread), thread: f.thread } as any, "L1", "Pad Thai");
+  check("placed order is immutable", f.state_!.items.length === 2, `${f.state_!.items.length} items`);
+  check("says it is too late", f.posts.at(-1)!.includes("too late"), f.posts.at(-1)!);
 }
 
 process.exit(fails ? 1 : 0);
