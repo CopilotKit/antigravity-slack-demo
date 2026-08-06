@@ -24,6 +24,7 @@
 import {
   Actions,
   Button,
+  Cell,
   Context,
   Divider,
   Field,
@@ -32,12 +33,26 @@ import {
   Image,
   Markdown,
   Message,
+  Row,
   Section,
+  Table,
   defineChannelComponent,
   defineChannelTool,
 } from "@copilotkit/channels";
 import type { Thread } from "@copilotkit/channels-ui";
 import { z } from "zod";
+
+/**
+ * Card or table layout for restaurants and menus. `LUNCH_LAYOUT=table` to flip.
+ *
+ * An experiment, kept side by side rather than swapped in, because the two
+ * lose different things. Slack lowers table cells to `raw_text`: no images, no
+ * buttons, no markdown. So the table is denser and comparable at a glance, but
+ * the photos go and every button has to move into one Actions row underneath,
+ * detached from the row it belongs to.
+ */
+const LAYOUT: "cards" | "table" =
+  process.env.LUNCH_LAYOUT?.trim().toLowerCase() === "table" ? "table" : "cards";
 
 // ---------------------------------------------------------------------------
 // Round state
@@ -313,6 +328,58 @@ export const ShowRestaurants = defineChannelComponent({
     restaurants: z.array(RESTAURANT).min(1).max(6),
   }),
   render({ restaurants }) {
+    if (LAYOUT === "table") {
+      return (
+        <Message>
+          <Header>Where are we ordering from?</Header>
+          <Table
+            columns={[
+              { header: "Restaurant" },
+              { header: "Cuisine" },
+              { header: "Price" },
+              { header: "Ready" },
+              { header: "Rating", align: "right" },
+            ]}
+          >
+            {restaurants.map((r) => (
+              <Row>
+                <Cell>{r.name}</Cell>
+                <Cell>{r.cuisine}</Cell>
+                <Cell>{r.price_range}</Cell>
+                <Cell>{`~${r.eta_minutes} min`}</Cell>
+                <Cell>{r.rating.toFixed(1)}</Cell>
+              </Row>
+            ))}
+          </Table>
+          {/* The blurbs cannot live in the table -- cells are raw_text, and a
+              paragraph per row would wreck the column widths anyway. */}
+          <Section>
+            <Markdown>
+              {restaurants.map((r) => `*${r.name}* — ${r.blurb}`).join("\n")}
+            </Markdown>
+          </Section>
+          {/* One detached row of buttons: a table cell cannot hold a button,
+              so the affordance loses its adjacency to the row it acts on. */}
+          <Actions>
+            {restaurants.map((r) => (
+              <Button
+                key={`choose-${r.id}`}
+                value={`${r.id}|${r.name}`}
+                onClick={async (ctx) => {
+                  const [, name] = String(ctx.action.value).split("|");
+                  await ctx.thread.runAgent({
+                    prompt: `Let's order from ${name}. Show me the menu.`,
+                  });
+                }}
+              >
+                {r.name}
+              </Button>
+            ))}
+          </Actions>
+          <Context>Or just say which one you fancy.</Context>
+        </Message>
+      );
+    }
     return (
       <Message>
         <Header>Where are we ordering from?</Header>
@@ -390,6 +457,96 @@ export const ShowMenu = defineChannelTool({
       // wrong food from the right place.
       items: existing && existing.restaurantId === restaurant.id ? existing.items : [],
     });
+
+    const addItem = async (ctx: any): Promise<void> => {
+      const [itemId, itemName, cents] = String(ctx.action.value).split("|");
+      const round = await readRound(ctx.thread);
+      if (!round) return;
+      if (round.placedAt) {
+        await ctx.thread.post(
+          <Message>
+            <Context>
+              {`That order already went in (${round.orderNumber}) — too late to add ${itemName}.`}
+            </Context>
+          </Message>,
+        );
+        return;
+      }
+      const whoId = ctx.user?.id ?? ctx.actor.id;
+      const who = personName(ctx);
+      const lineId = newLineId();
+      round.items.push({
+        lineId,
+        userId: whoId,
+        userName: who,
+        itemId,
+        itemName,
+        priceCents: Number(cents),
+      });
+      // No type argument: ctx is `any` here, so setState is untyped.
+      await ctx.thread.setState(round);
+      await ctx.thread.post(
+        <Message>
+          <Section>
+            <Markdown>
+              {`${personMarkdown(who, whoId)} added *${itemName}* — ${round.items.length} item${round.items.length === 1 ? "" : "s"} in the round.`}
+            </Markdown>
+          </Section>
+          <Actions>
+            <Button
+              value={lineId}
+              onClick={async (undo) => {
+                await removeLine(undo, String(undo.action.value), itemName);
+              }}
+            >
+              Remove
+            </Button>
+          </Actions>
+        </Message>,
+      );
+    };
+
+    if (LAYOUT === "table") {
+      await thread.post(
+        <Message>
+          <Header>{`${restaurant.name} — menu`}</Header>
+          <Table
+            columns={[
+              { header: "Dish" },
+              { header: "Price", align: "right" },
+              { header: "Notes" },
+            ]}
+          >
+            {items.map((item) => (
+              <Row>
+                <Cell>{item.name}</Cell>
+                <Cell>{money(item.price_cents)}</Cell>
+                <Cell>
+                  {item.tags?.length
+                    ? `${item.description} (${item.tags.join(", ")})`
+                    : item.description}
+                </Cell>
+              </Row>
+            ))}
+          </Table>
+          <Actions>
+            {items.map((item) => (
+              <Button value={`${item.id}|${item.name}|${item.price_cents}`} onClick={addItem}>
+                {item.name}
+              </Button>
+            ))}
+          </Actions>
+          <Context>
+            Tap a dish to add it. Ask me for the round when you want the total.
+          </Context>
+        </Message>,
+      );
+      return (
+        `Opened a lunch round for ${restaurant.name} and posted the menu.` +
+        (switching ? ` Cleared the previous ${existing!.restaurantName} picks.` : "") +
+        " People add items by clicking, which does not involve you - do not add anything on their behalf, and do not list the menu again in text."
+      );
+    }
 
     await thread.post(
       <Message>
