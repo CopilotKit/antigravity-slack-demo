@@ -60,6 +60,72 @@ or the service restarts. Without it, every deploy gives every thread amnesia.
 The disk also pins the service to a single instance — which is correct here,
 since sessions live in memory and a parked coroutine cannot be moved.
 
+## The lunch round
+
+The bot's actual job: help the office decide where to order from, collect
+everyone's picks into one round, and gate the order behind a human click.
+
+It is split across the two tool surfaces, which is the point of the demo:
+
+| | Where | What it owns |
+|---|---|---|
+| `search_restaurants`, `get_menu`, `get_order_history` | `agent/lunch.py` — **backend tools on Antigravity** | The catalogue. Plain Python functions; the adapter derives each schema from the signature. |
+| `show_restaurants`, `show_menu`, `show_round`, `confirm_order` | `channel/src/lunch-ui.tsx` — **channel tools** | Cards, clicks, round state, the order gate. |
+
+The model is the wire between them: it calls a backend tool, gets JSON, and
+passes that JSON to a render tool. That is why the schemas restate the shape
+instead of sharing a type — the two halves are different processes in
+different languages.
+
+A typical round:
+
+1. *"where should we order from?"* → `search_restaurants` → `show_restaurants`
+   posts four cards, and the agent adds a recommendation of its own, informed
+   by `get_order_history`.
+2. *"let's do thai"* → `get_menu` → `show_menu` posts dish cards and opens the
+   round. Picking is conversational; the Choose buttons are just a shortcut.
+3. People click **Add**. This is deliberately *not* an agent round trip — the
+   click writes thread state and acknowledges directly, so five people
+   ordering is five instant writes rather than five model turns.
+4. *"what's the round?"* → `show_round` renders who ordered what and the total.
+5. *"place it"* → `confirm_order` posts a summary with **Place order** /
+   **Cancel** and ends the turn. The agent cannot place anything itself.
+
+Round state lives in Slack thread state (`thread.setState`), so a round is
+scoped to a thread, survives a restart, and needs no database.
+
+### The catalogue is invented
+
+There is no self-serve API anywhere that lets a third party browse restaurant
+menus and order on a customer's behalf. Marketplace APIs are merchant-facing
+and partner-gated; the one sanctioned route to consumer ordering is DoorDash's
+[`dd-cli`](https://github.com/doordash-oss/doordash-cli), a waitlisted
+**macOS-arm64** binary meant to be driven over a shell by an agent — which
+also means it cannot run in this Linux container.
+
+So the restaurants are fictional, on purpose: putting a real business's name on
+orders it never agreed to serve is a misrepresentation, not a demo. Swapping in
+something real means replacing the three functions in `agent/lunch.py` and
+nothing else.
+
+Nothing spends money. The confirm gate still exists, because that is the seam a
+real backend attaches to, and by then the difference between proposing an order
+and buying lunch for nine people has to be a human click. The confirm handler
+re-reads state rather than trusting the click, so two people racing the button
+cannot double-order.
+
+### Interactive nodes need JSX keys
+
+A component registered through `defineChannelComponent` is bound with
+`requireKeys: true`, so the action registry **throws** on any node with an
+event handler that lacks a non-empty, unique JSX key. That throw happens inside
+the run loop, so the symptom is silence: nothing posted, nothing logged, and
+the model quietly re-issuing the call. It cost a debugging round here.
+
+Keys are how a registered component's handlers survive a restart — bound by key
+rather than tree position. `npm run check` type-checks and then walks every
+component we ship for unkeyed interactive nodes.
+
 ## Rich UI
 
 The agent can post images, tables and clickable choices itself. It speaks plain
