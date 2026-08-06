@@ -59,6 +59,11 @@ interface Round {
   /** Set once placed, so a second confirm cannot double-order. */
   placedAt?: string;
   orderNumber?: string;
+  /** Set when a placed order is cancelled; clears `placedAt` and reopens the round. */
+  cancelledAt?: string;
+  /** How many times this round has been placed. Salts the order number so a
+   *  re-place after a cancellation does not reuse the previous one. */
+  attempts?: number;
 }
 
 async function readRound(thread: Thread): Promise<Round | undefined> {
@@ -117,6 +122,25 @@ function personMarkdown(name: string, id: string): string {
   if (name) return name;
   const slackId = slackUserId(id);
   return slackId ? `<@${slackId}>` : id;
+}
+
+/**
+ * Mint a human-quotable order number.
+ *
+ * Derived from the cart rather than random so the same round always produces
+ * the same reference, and salted with the attempt count so re-placing an
+ * unchanged cart after a cancellation does not reuse the cancelled number.
+ */
+export function mintOrderNumber(
+  itemIds: string[],
+  restaurantId: string,
+  attempt: number,
+): string {
+  const hash = [...itemIds, restaurantId, String(attempt)]
+    .join()
+    .split("")
+    .reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7);
+  return `LN-${Math.abs(hash).toString(36).toUpperCase().slice(0, 6)}`;
 }
 
 /** "Tom Yum Soup, Tom Yum Soup" reads as a mistake; "Tom Yum Soup x2" reads as an order. */
@@ -427,7 +451,11 @@ export const ShowRound = defineChannelTool({
           </Actions>
         )}
         {round.placedAt ? null : (
-          <Context>Or just say "place the order" when everyone is in.</Context>
+          <Context>
+            {round.cancelledAt
+              ? `Order ${round.orderNumber} was cancelled — place again when you are ready.`
+              : 'Or just say "place the order" when everyone is in.'}
+          </Context>
         )}
       </Message>,
     );
@@ -514,17 +542,16 @@ async function postOrderGate(thread: Thread): Promise<string | null> {
                 );
                 return;
               }
-              const orderNumber = `LN-${Math.abs(
-                [...current.items.map((i) => i.itemId), current.restaurantId]
-                  .join()
-                  .split("")
-                  .reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7),
-              )
-                .toString(36)
-                .toUpperCase()
-                .slice(0, 6)}`;
+              const attempt = (current.attempts ?? 0) + 1;
+              const orderNumber = mintOrderNumber(
+                current.items.map((i) => i.itemId),
+                current.restaurantId,
+                attempt,
+              );
               current.placedAt = new Date().toISOString();
               current.orderNumber = orderNumber;
+              current.attempts = attempt;
+              delete current.cancelledAt;
               await ctx.thread.setState<Round>(current);
               const who = personName(ctx) || "Someone";
               await ctx.thread.post(
@@ -536,8 +563,20 @@ async function postOrderGate(thread: Thread): Promise<string | null> {
                     <Field label="Total">{money(totalCents(current))}</Field>
                     <Field label="Confirmed by">{who}</Field>
                   </Fields>
+                  <Actions>
+                    <Button
+                      style="danger"
+                      value={orderNumber}
+                      onClick={async (c2) => {
+                        await cancelPlacedOrder(c2.thread, personName(c2) || "Someone");
+                      }}
+                    >
+                      Cancel order
+                    </Button>
+                  </Actions>
                   <Context>
-                    Simulated — this demo has no ordering backend, so no food is on its way.
+                    Simulated — this demo has no ordering backend, so no food is on its
+                    way. Cancelling reopens the round with everyone's picks intact.
                   </Context>
                 </Message>,
               );
@@ -567,5 +606,64 @@ async function postOrderGate(thread: Thread): Promise<string | null> {
   return `${round.restaurantName}, ${money(total)}`;
 }
 
+/**
+ * Undo a placed order and reopen the round.
+ *
+ * Shared by the "Cancel order" button on the confirmation and the
+ * `cancel_order` tool, so clicking and asking behave identically.
+ *
+ * Single click, no second gate, unlike placing. Placing commits to spending
+ * money and is the thing that needs a human in the way; cancelling is the
+ * recovery from it, and putting a confirmation in front of an undo mostly
+ * means the undo arrives too late. Picks are kept, so the round can be
+ * adjusted and placed again.
+ *
+ * Returns what happened, phrased for the model when it comes via the tool.
+ */
+async function cancelPlacedOrder(thread: Thread, who: string): Promise<string> {
+  const round = await readRound(thread);
+  if (!round) return "There is no lunch round in this thread, so there is nothing to cancel.";
+  if (!round.placedAt) {
+    return round.cancelledAt
+      ? `Order ${round.orderNumber} was already cancelled. The round is open; nothing to do.`
+      : "Nothing has been placed yet, so there is nothing to cancel. The round is still open.";
+  }
+
+  const cancelled = round.orderNumber;
+  // Re-read and write in one step for the same reason placing does: two people
+  // can hit Cancel on the same message before either write lands.
+  round.cancelledAt = new Date().toISOString();
+  delete round.placedAt;
+  await thread.setState<Round>(round);
+
+  await thread.post(
+    <Message accent="#ECB22E">
+      <Header>Order cancelled</Header>
+      <Section>
+        <Markdown>
+          {`${who} cancelled *${cancelled}* at ${round.restaurantName}. Everyone's picks are still here — add or change what you like and place it again.`}
+        </Markdown>
+      </Section>
+      <Context>Simulated, so nothing was ever really ordered or refunded.</Context>
+    </Message>,
+  );
+
+  return `Cancelled ${cancelled} at ${round.restaurantName}. The round is open again with ${round.items.length} item(s) intact. Say so in one line.`;
+}
+
+/** Cancel a placed order by asking, rather than clicking. */
+export const CancelOrder = defineChannelTool({
+  name: "cancel_order",
+  description:
+    "Cancel an order that has already been placed, reopening the round with " +
+    "everyone's picks intact. Use it when someone says to cancel, undo, or " +
+    "call off the order. Only works after an order was placed - if nothing " +
+    "has been placed, say so rather than clearing the round.",
+  parameters: z.object({}),
+  async handler(_args, { thread, ...ctx }) {
+    return cancelPlacedOrder(thread, personName(ctx) || "Someone");
+  },
+});
+
 export const LUNCH_COMPONENTS = [ShowRestaurants];
-export const LUNCH_TOOLS = [ShowMenu, ShowRound, ConfirmOrder];
+export const LUNCH_TOOLS = [ShowMenu, ShowRound, ConfirmOrder, CancelOrder];
