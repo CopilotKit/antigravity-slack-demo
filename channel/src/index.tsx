@@ -80,6 +80,21 @@ const channel = createChannel({
  * reply and then leaves Slack's typing indicator spinning is indistinguishable
  * from one still doing work: both are silence.
  */
+/**
+ * Runs still going. Held so a shutdown can wait for them.
+ *
+ * Render starts the replacement worker before killing this one, and both are
+ * attached to the gateway during the overlap -- so a message can land here
+ * moments before SIGTERM. Exiting immediately abandons that run: the reply is
+ * never posted and Slack's status indicator spins forever, which reads as a
+ * slow bot rather than a lost message. Four runs went that way before this
+ * existed.
+ */
+const inFlight = new Set<Promise<unknown>>();
+
+/** Render's grace period is ~30s; leave room for stop() and the exit. */
+const DRAIN_MS = 20_000;
+
 async function traced(
   label: string,
   // runAgent resolves to a MessageRef, not void; the result is unused here.
@@ -87,12 +102,36 @@ async function traced(
 ): Promise<void> {
   const started = Date.now();
   console.log(`[${label}] runAgent →`);
+  const settled = Promise.resolve().then(run);
+  inFlight.add(settled);
   try {
-    await run();
+    await settled;
     console.log(`[${label}] runAgent ← returned after ${Date.now() - started}ms`);
   } catch (error) {
     console.error(`[${label}] runAgent ✗ after ${Date.now() - started}ms`, error);
     throw error;
+  } finally {
+    inFlight.delete(settled);
+  }
+}
+
+/** Give in-flight runs a bounded chance to finish before the process goes. */
+async function drain(signal: string): Promise<void> {
+  if (inFlight.size === 0) return;
+  console.log(`${signal} — waiting for ${inFlight.size} run(s) to finish…`);
+  const started = Date.now();
+  // allSettled so one failing run does not cut the wait short for the others.
+  const finished = Promise.allSettled([...inFlight]);
+  const deadline = new Promise<void>((resolve) => {
+    setTimeout(resolve, DRAIN_MS).unref();
+  });
+  await Promise.race([finished, deadline]);
+  if (inFlight.size > 0) {
+    console.warn(
+      `${inFlight.size} run(s) still going after ${Date.now() - started}ms — exiting anyway`,
+    );
+  } else {
+    console.log(`drained in ${Date.now() - started}ms`);
   }
 }
 
@@ -237,7 +276,13 @@ async function main(): Promise<void> {
       if (closing) return;
       closing = true;
       console.log(`\n${signal} — stopping…`);
-      void Promise.resolve(handler.channels.stop())
+      // Drain before stop(), not after: stop() tears down the transport the
+      // in-flight run is posting over. The cost is a small window where this
+      // worker can still pick up a message it may not finish -- preferable to
+      // reliably abandoning the one already running.
+      void drain(signal)
+        .catch((error) => console.error("Error draining runs:", error))
+        .then(() => handler.channels.stop())
         .catch((error) => console.error("Error stopping channels:", error))
         .finally(() => process.exit(0));
     });

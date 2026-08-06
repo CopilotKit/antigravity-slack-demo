@@ -7,7 +7,7 @@
     "start": "tsx src/index.tsx",
     "dev": "tsx watch src/index.tsx",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && tsx src/checks/interactive-keys.tsx"
+    "check": "tsc --noEmit && tsx src/checks/interactive-keys.tsx && tsx src/checks/drain.ts"
   },
   "dependencies": {
     "@ag-ui/client": "^0.0.57",
