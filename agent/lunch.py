@@ -179,9 +179,11 @@ _HISTORY: List[Dict[str, Any]] = [
 def search_restaurants(query: str = "") -> List[Dict[str, Any]]:
     """Find restaurants the office can order lunch from.
 
-    Call this before suggesting anywhere to eat, and pass the result to the
-    show_restaurants tool so people can see the options rather than read a
-    list. Returns every field needed to render a card.
+    ALWAYS follow this with the show_restaurants tool, passing these results
+    through unchanged. Listing the restaurants as text instead is wrong: the
+    people reading are picking lunch in Slack, and a bulleted list gives them
+    no photos, no prices and nothing to click. Add your own recommendation in
+    words on top of the cards -- that part is yours, the listing is not.
 
     Args:
       query: Free text to filter on, matched against name, cuisine, blurb and
