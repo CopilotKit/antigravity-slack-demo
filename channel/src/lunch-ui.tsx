@@ -124,14 +124,21 @@ function byPerson(
   const order: string[] = [];
   const seen = new Map<string, { id: string; name: string; items: string[]; cents: number }>();
   for (const item of round.items) {
+    // Sanitise on read, not just on write: rounds already in thread state were
+    // recorded before personName() existed and have a bare id stored as the
+    // name. Re-checking here lets markdown fall back to a mention, which Slack
+    // resolves to the real name, instead of printing the id.
+    const stored = LOOKS_LIKE_AN_ID.test(item.userName?.trim() ?? "")
+      ? ""
+      : item.userName;
     let entry = seen.get(item.userId);
     if (!entry) {
-      entry = { id: item.userId, name: item.userName, items: [], cents: 0 };
+      entry = { id: item.userId, name: stored, items: [], cents: 0 };
       seen.set(item.userId, entry);
       order.push(item.userId);
     }
     // A later click may carry a name an earlier one lacked.
-    if (!entry.name && item.userName) entry.name = item.userName;
+    if (!entry.name && stored) entry.name = stored;
     entry.items.push(item.itemName);
     entry.cents += item.priceCents;
   }
